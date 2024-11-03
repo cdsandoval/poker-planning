@@ -2,8 +2,40 @@ import { useState, useEffect } from "react";
 import { RealtimeChannel } from "@supabase/supabase-js";
 import { supabase } from "./lib/supabase";
 import { Room, Participant } from "./types";
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+  useParams,
+  useNavigate,
+} from "react-router-dom";
 
-function App() {
+// Create Home component
+function Home() {
+  const navigate = useNavigate();
+
+  return (
+    <div className="space-y-4">
+      <button
+        onClick={() => navigate("/create")}
+        className="w-full bg-blue-500 text-white px-4 py-3 rounded-lg hover:bg-blue-600"
+      >
+        Create New Room
+      </button>
+      <button
+        onClick={() => navigate("/join")}
+        className="w-full bg-green-500 text-white px-4 py-3 rounded-lg hover:bg-green-600"
+      >
+        Join Existing Room
+      </button>
+    </div>
+  );
+}
+
+// Update App component
+function PlanningRoom({ initialMode }: { initialMode?: "create" | "join" }) {
+  const { roomId: urlRoomId } = useParams();
+  const navigate = useNavigate();
   const [roomId, setRoomId] = useState<string>("");
   const [username, setUsername] = useState<string>("");
   const [participants, setParticipants] = useState<Participant[]>([]);
@@ -15,8 +47,6 @@ function App() {
   const [channel, setChannel] = useState<RealtimeChannel | null>(null);
   const [joinMode, setJoinMode] = useState<"create" | "join" | null>(null);
   const [average, setAverage] = useState<number | null>(null);
-
-  const votingOptions = ["0", "1", "2", "3", "5", "8", "13", "21", "34", "55"];
 
   // Create a new room
   const createRoom = async () => {
@@ -67,6 +97,7 @@ function App() {
       setRoomId(room.id);
       setParticipantId(participant.id);
       setIsJoining(false);
+      navigate(`/room/${room.id}`);
     } catch (error) {
       console.error("Error:", error);
       setError("Failed to create room");
@@ -91,13 +122,12 @@ function App() {
       }
 
       // Check if a participant with the same name already exists in the room
-      const { data: existingParticipant, error: existingParticipantError } =
-        await supabase
-          .from("participants")
-          .select("*")
-          .eq("room_id", roomId)
-          .eq("name", username)
-          .single();
+      const { data: existingParticipant } = await supabase
+        .from("participants")
+        .select("*")
+        .eq("room_id", roomId)
+        .eq("name", username)
+        .single();
 
       if (existingParticipant) {
         setError("A participant with the same name already exists in the room");
@@ -345,6 +375,21 @@ function App() {
     }
   }, [participants, isRevealed]);
 
+  // Add effect to handle URL room ID
+  useEffect(() => {
+    if (urlRoomId && isJoining) {
+      setRoomId(urlRoomId);
+      setJoinMode("join");
+    }
+  }, [urlRoomId, isJoining]);
+
+  // Set initial join mode when component mounts
+  useEffect(() => {
+    if (initialMode) {
+      setJoinMode(initialMode);
+    }
+  }, [initialMode]);
+
   // Render participants list
   const renderParticipants = () => (
     <div className="mb-6">
@@ -504,10 +549,11 @@ function App() {
     <div className="min-h-screen bg-gray-50 p-4">
       <div className="max-w-4xl mx-auto bg-white rounded-lg shadow p-6">
         {isJoining ? (
+          // Change this part to always show renderJoinCreate for /create and /join routes
           renderJoinCreate()
         ) : (
           <div className="space-y-6">
-            {/* Room Header */}
+            {/* Room UI - No changes needed here */}
             <div className="flex justify-between items-center border-b pb-4">
               <div>
                 <h2 className="text-xl font-bold">Planning Poker</h2>
@@ -579,6 +625,31 @@ function App() {
         )}
       </div>
     </div>
+  );
+}
+
+// Split Home into a standalone component
+function HomePage() {
+  return (
+    <div className="min-h-screen bg-gray-50 p-4">
+      <div className="max-w-4xl mx-auto bg-white rounded-lg shadow p-6">
+        <Home />
+      </div>
+    </div>
+  );
+}
+
+// Update App component routing
+function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<HomePage />} />
+        <Route path="/create" element={<PlanningRoom initialMode="create" />} />
+        <Route path="/join" element={<PlanningRoom initialMode="join" />} />
+        <Route path="/room/:roomId" element={<PlanningRoom />} />
+      </Routes>
+    </BrowserRouter>
   );
 }
 
