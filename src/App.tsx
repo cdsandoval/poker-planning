@@ -14,6 +14,7 @@ function App() {
   const [isJoining, setIsJoining] = useState(true);
   const [channel, setChannel] = useState<RealtimeChannel | null>(null);
   const [joinMode, setJoinMode] = useState<"create" | "join" | null>(null);
+  const [average, setAverage] = useState<number | null>(null);
 
   const votingOptions = ["0", "1", "2", "3", "5", "8", "13", "21", "34", "55"];
 
@@ -27,6 +28,27 @@ function App() {
         .single();
 
       if (roomError) throw roomError;
+
+      // Check if a participant with the same name already exists in the room
+      const { data: existingParticipant, error: existingParticipantError } =
+        await supabase
+          .from("participants")
+          .select("*")
+          .eq("room_id", room.id)
+          .eq("name", username)
+          .single();
+
+      if (
+        existingParticipantError &&
+        existingParticipantError.code !== "PGRST116"
+      ) {
+        throw existingParticipantError;
+      }
+
+      if (existingParticipant) {
+        setError("A participant with the same name already exists in the room");
+        return;
+      }
 
       const { data: participant, error: participantError } = await supabase
         .from("participants")
@@ -65,6 +87,20 @@ function App() {
 
       if (roomError) {
         setError("Room not found");
+        return;
+      }
+
+      // Check if a participant with the same name already exists in the room
+      const { data: existingParticipant, error: existingParticipantError } =
+        await supabase
+          .from("participants")
+          .select("*")
+          .eq("room_id", roomId)
+          .eq("name", username)
+          .single();
+
+      if (existingParticipant) {
+        setError("A participant with the same name already exists in the room");
         return;
       }
 
@@ -109,12 +145,31 @@ function App() {
   };
 
   // Reveal votes
+  const calculateAverage = (participants: Participant[]): number => {
+    const numericVotes = participants
+      .map((p) => Number(p.vote))
+      .filter((vote) => !isNaN(vote));
+
+    if (numericVotes.length === 0) return 0;
+
+    return Number(
+      (numericVotes.reduce((a, b) => a + b, 0) / numericVotes.length).toFixed(1)
+    );
+  };
+
   const handleReveal = async () => {
     try {
-      await supabase.from("rooms").update({ revealed: true }).eq("id", roomId);
+      const { error } = await supabase
+        .from("rooms")
+        .update({ revealed: true })
+        .eq("id", roomId);
+
+      if (error) throw error;
+
       setIsRevealed(true);
+      setAverage(calculateAverage(participants));
     } catch (error) {
-      console.error("Error:", error);
+      console.error("Error revealing votes:", error);
       setError("Failed to reveal votes");
     }
   };
@@ -131,8 +186,9 @@ function App() {
 
       setIsRevealed(false);
       setCurrentVote(null);
+      setAverage(null);
     } catch (error) {
-      console.error("Error:", error);
+      console.error("Error resetting votes:", error);
       setError("Failed to reset votes");
     }
   };
@@ -151,7 +207,7 @@ function App() {
       },
     });
 
-    // Handle room changes (reveal/reset)
+    // Handle room changes and participant changes in a single channel
     channel
       .on(
         "postgres_changes",
@@ -165,10 +221,12 @@ function App() {
           console.log("Room changed:", payload);
           if (payload.new) {
             setIsRevealed((payload.new as Room).revealed);
+            if (!(payload.new as Room).revealed) {
+              setCurrentVote(null);
+            }
           }
         }
       )
-      // Handle participant changes (join/leave/vote)
       .on(
         "postgres_changes",
         {
@@ -177,37 +235,30 @@ function App() {
           table: "participants",
           filter: `room_id=eq.${roomId}`,
         },
-        async (payload) => {
+        (payload) => {
           console.log("Participant changed:", payload);
-
-          // Handle different events
           switch (payload.eventType) {
             case "INSERT":
-              // New participant joined
-              setParticipants((current) => {
-                // Check if participant already exists
-                const exists = current.some((p) => p.id === payload.new.id);
-                if (exists) return current;
-                return [...current, payload.new as Participant];
+              setParticipants((prev) => {
+                const exists = prev.some((p) => p.id === payload.new.id);
+                if (exists) return prev;
+                return [...prev, payload.new as Participant];
               });
               break;
-
             case "DELETE":
-              // Participant left
-              const oldParticipant = payload.old as Participant;
               setParticipants((prev) =>
-                prev.filter((p) => p.id !== oldParticipant.id)
+                prev.filter((p) => p.id !== payload.old.id)
               );
               break;
-
             case "UPDATE":
-              // Participant voted or changed
-              const updatedParticipant = payload.new as Participant;
               setParticipants((prev) =>
                 prev.map((p) =>
-                  p.id === updatedParticipant.id ? updatedParticipant : p
+                  p.id === payload.new.id ? (payload.new as Participant) : p
                 )
               );
+              if (payload.new.id === participantId && !payload.new.vote) {
+                setCurrentVote(null);
+              }
               break;
           }
         }
@@ -222,6 +273,7 @@ function App() {
       })
       .on("presence", { event: "leave" }, ({ key, leftPresences }) => {
         console.log("User left:", key, leftPresences);
+        setParticipants((prev) => prev.filter((p) => p.id !== key));
       })
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
@@ -287,45 +339,11 @@ function App() {
     fetchParticipants();
   }, [roomId, isJoining]);
 
-  // Set up real-time subscription for participants
   useEffect(() => {
-    if (!roomId || isJoining) return;
-
-    // Subscribe to participant changes
-    const participantsSubscription = supabase
-      .channel(`room-${roomId}-participants`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "participants",
-          filter: `room_id=eq.${roomId}`,
-        },
-        (payload) => {
-          console.log("Participant change:", payload);
-
-          if (payload.eventType === "INSERT") {
-            setParticipants((prev) => [...prev, payload.new as Participant]);
-          } else if (payload.eventType === "DELETE") {
-            setParticipants((prev) =>
-              prev.filter((p) => p.id !== payload.old.id)
-            );
-          } else if (payload.eventType === "UPDATE") {
-            setParticipants((prev) =>
-              prev.map((p) =>
-                p.id === payload.new.id ? (payload.new as Participant) : p
-              )
-            );
-          }
-        }
-      )
-      .subscribe();
-
-    return () => {
-      participantsSubscription.unsubscribe();
-    };
-  }, [roomId, isJoining]);
+    if (isRevealed) {
+      setAverage(calculateAverage(participants));
+    }
+  }, [participants, isRevealed]);
 
   // Render participants list
   const renderParticipants = () => (
@@ -495,6 +513,12 @@ function App() {
                 <h2 className="text-xl font-bold">Planning Poker</h2>
                 <p className="text-sm text-gray-500">Room ID: {roomId}</p>
               </div>
+              <button
+                onClick={handleLeave}
+                className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"
+              >
+                Leave Room
+              </button>
               <div className="flex space-x-2">
                 {!isRevealed && (
                   <button
@@ -545,6 +569,12 @@ function App() {
                 )
               )}
             </div>
+
+            {isRevealed && (
+              <div className="mt-4">
+                <p className="text-lg font-semibold">Average: {average}</p>
+              </div>
+            )}
           </div>
         )}
       </div>
