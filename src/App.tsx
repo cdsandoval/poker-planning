@@ -184,8 +184,12 @@ function App() {
           switch (payload.eventType) {
             case "INSERT":
               // New participant joined
-              const newParticipant = payload.new as Participant;
-              setParticipants((prev) => [...prev, newParticipant]);
+              setParticipants((current) => {
+                // Check if participant already exists
+                const exists = current.some((p) => p.id === payload.new.id);
+                if (exists) return current;
+                return [...current, payload.new as Participant];
+              });
               break;
 
             case "DELETE":
